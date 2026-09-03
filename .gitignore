@@ -8,10 +8,18 @@ pnpm-debug.log*
 lerna-debug.log*
 
 DataPreProcess/LRS2
+DataPreProcess/Vox2
+DataPreProcess/LRS3
+DataPreProcess/video_pretrain.*
 DataPreProcess/video_pretrain
 DataPreProcess/videodata_3dataset.txt
 av_hubert
 Experiments
+checkpoints
+demo1/
+real-world-demo/
+test_videos/
+__pycache__/
 videoencoder_pretrain/test_mouths
 videoencoder_pretrain/test_out
 node_modules

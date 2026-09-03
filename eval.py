@@ -6,7 +6,7 @@
 ###
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "8"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import argparse
 import warnings
 
