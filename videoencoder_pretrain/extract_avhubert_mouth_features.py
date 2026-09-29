@@ -104,37 +104,113 @@ def merge_shard_files(output_dir, merged_output_name, skip_filenames=None):
     print(f"Saved merged data to {merged_output_path}")
 
 
-def extract_visual_feature(video_path, ckpt_path, user_dir, is_finetune_ckpt=False):
-    # Import AV-HuBERT tasks/models only once via fairseq's user_dir hook.
+def load_avhubert_model(ckpt_path, user_dir):
+    # Register AV-HuBERT with fairseq once.
     if "avhubert" not in sys.modules:
-        fairseq_utils.import_user_module(Namespace(user_dir=user_dir))
+        fairseq_utils.import_user_module(
+            Namespace(user_dir=user_dir)
+        )
+
     patch_torch_load_for_legacy_checkpoints()
     register_checkpoint_safe_globals()
-    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([ckpt_path])
+
+    print(f"Loading AV-HuBERT checkpoint: {ckpt_path}")
+
+    models, saved_cfg, task = (
+        checkpoint_utils.load_model_ensemble_and_task(
+            [ckpt_path]
+        )
+    )
+
+    model = models[0]
+
+    if hasattr(model, "decoder"):
+        model = model.encoder.w2v_model
+
+    model = model.cuda().eval()
 
     transform = avhubert_utils.Compose([
         avhubert_utils.Normalize(0.0, 255.0),
-        avhubert_utils.CenterCrop((task.cfg.image_crop_size, task.cfg.image_crop_size)),
-        avhubert_utils.Normalize(task.cfg.image_mean, task.cfg.image_std)
+        avhubert_utils.CenterCrop(
+            (
+                task.cfg.image_crop_size,
+                task.cfg.image_crop_size,
+            )
+        ),
+        avhubert_utils.Normalize(
+            task.cfg.image_mean,
+            task.cfg.image_std,
+        ),
     ])
 
-    frames = torch.tensor(np.load(video_path)["data"], dtype=torch.float32)
+    print("AV-HuBERT loaded.")
+
+    return model, transform
+
+
+
+def extract_visual_feature(
+    video_path,
+    model,
+    transform,
+):
+    frames = torch.tensor(
+        np.load(video_path)["data"],
+        dtype=torch.float32,
+    )
+
     frames = transform(frames)
-    frames = frames.unsqueeze(0).unsqueeze(0).cuda()
 
-    model = models[0]
-    if hasattr(models[0], "decoder"):
-        model = models[0].encoder.w2v_model
-    model.cuda().eval()
+    frames = (
+        frames
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .cuda(non_blocking=True)
+    )
 
-    with torch.no_grad():
+    with torch.inference_mode():
         feature, _ = model.extract_finetune(
-            source={"video": frames, "audio": None},
+            source={
+                "video": frames,
+                "audio": None,
+            },
             padding_mask=None,
             output_layer=None,
         )
-        feature = feature.squeeze(0)
-    return feature
+
+    return feature.squeeze(0)
+
+# def extract_visual_feature(video_path, ckpt_path, user_dir, is_finetune_ckpt=False):
+#     # Import AV-HuBERT tasks/models only once via fairseq's user_dir hook.
+#     if "avhubert" not in sys.modules:
+#         fairseq_utils.import_user_module(Namespace(user_dir=user_dir))
+#     patch_torch_load_for_legacy_checkpoints()
+#     register_checkpoint_safe_globals()
+#     models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([ckpt_path])
+
+#     transform = avhubert_utils.Compose([
+#         avhubert_utils.Normalize(0.0, 255.0),
+#         avhubert_utils.CenterCrop((task.cfg.image_crop_size, task.cfg.image_crop_size)),
+#         avhubert_utils.Normalize(task.cfg.image_mean, task.cfg.image_std)
+#     ])
+
+#     frames = torch.tensor(np.load(video_path)["data"], dtype=torch.float32)
+#     frames = transform(frames)
+#     frames = frames.unsqueeze(0).unsqueeze(0).cuda()
+
+#     model = models[0]
+#     if hasattr(models[0], "decoder"):
+#         model = models[0].encoder.w2v_model
+#     model.cuda().eval()
+
+#     with torch.no_grad():
+#         feature, _ = model.extract_finetune(
+#             source={"video": frames, "audio": None},
+#             padding_mask=None,
+#             output_layer=None,
+#         )
+#         feature = feature.squeeze(0)
+#     return feature
 
 
 class VideoDataset(Dataset):
@@ -236,11 +312,27 @@ def main():
         num_workers=args.num_workers,
     )
 
-    for video_paths in tqdm(dataloader, disable=(rank != 0)):
+
+    model, transform = load_avhubert_model(
+        args.ckpt_path,
+        args.user_dir,
+    )
+
+
+    for video_paths in tqdm(
+        dataloader,
+        disable=(rank != 0),
+    ):
         for video_path in video_paths:
-            print("Processing", video_path)
-            feature = extract_visual_feature(video_path, args.ckpt_path, args.user_dir)
-            results[os.path.abspath(video_path)] = feature.cpu()
+            feature = extract_visual_feature(
+                video_path,
+                model,
+                transform,
+            )
+
+            results[
+                os.path.abspath(video_path)
+            ] = feature.cpu()
 
     torch.save(results, output_path)
     dist.barrier()
