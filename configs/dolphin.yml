@@ -133,7 +133,7 @@ loss:
 # Training config
 training:
   system: AudioVisualLightningModuleAE
-  gpus: [1]
+  gpus: [0]
   parallel: ddp
   epochs: 500
   gradient_clip_val: 5.0
@@ -174,12 +174,12 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: LRS2-final-Dolphin-1gpu-batch4
+  exp_name: Dolphin_LRS2
 
 logging:
-  use_swanlab: true
-  swanlab:
-    project: "test-dolpin"
-    workspace: "jusperlee"
-    offline: false
+  use_wandb: true
 
+  wandb:
+    project: "Dolphin"
+    entity: null
+    save_dir: "runs/wandb"

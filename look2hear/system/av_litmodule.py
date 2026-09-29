@@ -161,32 +161,65 @@ class AudioVisualLightningModuleAE(pl.LightningModule):
             return {"test_loss": tloss}
 
     def on_validation_epoch_end(self):
-        # val
-        avg_loss = torch.stack(self.validation_step_outputs).mean()
-        val_loss = torch.mean(self.all_gather(avg_loss))
+        # --------------------------------------------------------------
+        # Validation
+        # --------------------------------------------------------------
+        if self.validation_step_outputs:
+            avg_loss = torch.stack(
+                self.validation_step_outputs
+            ).mean()
+
+            val_loss = torch.mean(
+                self.all_gather(avg_loss)
+            )
+
+            self.log(
+                "val_pit_sisnr",
+                -val_loss,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+                logger=True,
+            )
+
+        # --------------------------------------------------------------
+        # Learning rate
+        # --------------------------------------------------------------
         self.log(
             "lr",
             self.optimizer.param_groups[0]["lr"],
             on_epoch=True,
             prog_bar=True,
             sync_dist=True,
-        )
-        self.logger.experiment.log(
-            {"learning_rate": self.optimizer.param_groups[0]["lr"], "epoch": self.current_epoch}
-        )
-        self.logger.experiment.log(
-            {"val_pit_sisnr": -val_loss, "epoch": self.current_epoch}
+            logger=True,
         )
 
-        # test
-        if (self.trainer.current_epoch) % 10 == 0:
-            avg_loss = torch.stack(self.test_step_outputs).mean()
-            test_loss = torch.mean(self.all_gather(avg_loss))
-            self.logger.experiment.log(
-                {"test_pit_sisnr": -test_loss, "epoch": self.current_epoch}
+        # --------------------------------------------------------------
+        # Test
+        # --------------------------------------------------------------
+        if (
+            self.trainer.current_epoch % 10 == 0
+            and self.test_step_outputs
+        ):
+            avg_loss = torch.stack(
+                self.test_step_outputs
+            ).mean()
+
+            test_loss = torch.mean(
+                self.all_gather(avg_loss)
             )
-        self.validation_step_outputs.clear()  # free memory
-        self.test_step_outputs.clear()  # free memory
+
+            self.log(
+                "test_pit_sisnr",
+                -test_loss,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+                logger=True,
+            )
+
+        self.validation_step_outputs.clear()
+        self.test_step_outputs.clear()
 
     def configure_optimizers(self):
         """Initialize optimizers, batch-wise and epoch-wise schedulers."""

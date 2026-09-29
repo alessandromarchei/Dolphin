@@ -61,3 +61,4 @@ tmp/*
 *.pt.tar.lz4
 
 notes.txt
+runs/

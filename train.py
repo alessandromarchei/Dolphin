@@ -8,7 +8,7 @@ import torch
 import yaml
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
 
 import look2hear.datas
@@ -34,29 +34,51 @@ def safe_get(config: Dict[str, Any], path: str, default: Any = None) -> Any:
 
 
 def build_logger(config: Dict[str, Any], exp_name: str):
-    logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")
-    os.makedirs(os.path.join(logger_dir, exp_name), exist_ok=True)
+    logging_cfg = safe_get(config, "logging", {}) or {}
 
-    use_swanlab = safe_get(config, "logging.use_swanlab", False)
-    if use_swanlab:
-        try:
-            from swanlab.integration.pytorch_lightning import SwanLabLogger
+    # ------------------------------------------------------------------
+    # Weights & Biases
+    # ------------------------------------------------------------------
+    if logging_cfg.get("use_wandb", False):
+        wandb_cfg = logging_cfg.get("wandb", {}) or {}
 
-            swan_cfg = safe_get(config, "logging.swanlab", {}) or {}
-            info("Using SwanLabLogger")
-            return SwanLabLogger(
-                experiment_name=exp_name,
-                save_dir=os.path.join(logger_dir, exp_name),
-                project=swan_cfg.get("project", "dolphin"),
-                workspace=swan_cfg.get("workspace", ""),
-                offline=swan_cfg.get("offline", False),
-            )
-        except Exception as ex:
-            info(f"SwanLab unavailable, fallback to TensorBoard. reason: {ex}")
+        project = wandb_cfg.get("project", "dolphin")
+        entity = wandb_cfg.get("entity", None)
+        save_dir = wandb_cfg.get(
+            "save_dir",
+            os.path.join(os.getcwd(), "Experiments", "wandb"),
+        )
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        info(
+            f"Using WandbLogger "
+            f"(project={project}, entity={entity}, name={exp_name})"
+        )
+
+        return WandbLogger(
+            project=project,
+            entity=entity,
+            name=exp_name,
+            save_dir=save_dir,
+            log_model=False,
+        )
+    # ------------------------------------------------------------------
+    # TensorBoard fallback
+    # ------------------------------------------------------------------
+    logger_dir = os.path.join(
+        os.getcwd(),
+        "Experiments",
+        "tensorboard_logs",
+    )
+    os.makedirs(logger_dir, exist_ok=True)
 
     info("Using TensorBoardLogger")
-    return TensorBoardLogger(logger_dir, name=exp_name)
 
+    return TensorBoardLogger(
+        logger_dir,
+        name=exp_name,
+    )
 
 def main(config: Dict[str, Any]) -> None:
     if "datamodule" not in config:
