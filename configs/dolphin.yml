@@ -168,8 +168,8 @@ datamodule:
     sample_rate: 16000
     segment: 2.0
     normalize_audio: false
-    batch_size: 4
-    num_workers: 8
+    batch_size: 2
+    num_workers: 16
     pin_memory: true
     persistent_workers: false
 
@@ -182,4 +182,4 @@ logging:
   wandb:
     project: "Dolphin"
     entity: null
-    save_dir: "runs/wandb"
+    save_dir: "Experiments/wandb"
