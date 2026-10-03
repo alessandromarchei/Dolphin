@@ -161,7 +161,7 @@ scheduler:
 visual:
   # Keep "mouth_frames" for Dolphin's original visual encoder, or select
   # "avhubert_embeddings" to load precomputed (frames, 1024) .npy features.
-  input_type: mouth_frames
+  input_type: avhubert_embeddings
   embeddings_dir: null
   embedding_dim: 1024
 
@@ -181,7 +181,7 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: Dolphin_LRS2
+  exp_name: Dolphin_LRS2_avhubert
 
 logging:
   use_wandb: true

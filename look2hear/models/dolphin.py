@@ -1296,9 +1296,21 @@ class Dolphin(nn.Module, PyTorchModelHubMixin):
                  vin_channels=64,
                  vout_channels=64,
                  is_train: bool = False,
-                 video_encoder_pretrained_hf: dict = None,):
+                 video_encoder_pretrained_hf: dict = None,
+                 visual_input_type: str = "mouth_frames",
+                 visual_embedding_dim: int = 1024):
         super(Dolphin, self).__init__()
 
+        if visual_input_type not in {"mouth_frames", "avhubert_embeddings"}:
+            raise ValueError(
+                "visual_input_type must be 'mouth_frames' or 'avhubert_embeddings', "
+                f"got {visual_input_type!r}"
+            )
+        self.visual_input_type = visual_input_type
+        if self.visual_input_type == "avhubert_embeddings":
+            if visual_embedding_dim < 1:
+                raise ValueError("visual_embedding_dim must be a positive integer")
+            vpre_channels = visual_embedding_dim
         self.pre_v1 = ConvNormAct(vpre_channels, vin_channels, kSize=3, norm_type="BN")
 
         self.num_stages = num_stages
@@ -1311,14 +1323,20 @@ class Dolphin(nn.Module, PyTorchModelHubMixin):
         self.video_blocks = UConvBlock(vin_channels, vout_channels, 3, norm_type="BN")
         self.modalfuse = AVFModule(module_feature_projector["out_channels"], vout_channels)
     
-        self.video_encoder = VideoEncoder(**video_encoder_params)
+        self.video_encoder = (
+            VideoEncoder(**video_encoder_params)
+            if self.visual_input_type == "mouth_frames"
+            else None
+        )
         self.is_train = is_train
 
-        if self.is_train:
+        if self.is_train and self.video_encoder is not None:
             self._load_video_encoder_from_hub(video_encoder_pretrained_hf)
             self._freeze_video_encoder()
 
     def _freeze_video_encoder(self):
+        if self.video_encoder is None:
+            return
         for param in self.video_encoder.parameters():
             param.requires_grad = False
         self.video_encoder.eval()
@@ -1441,7 +1459,7 @@ class Dolphin(nn.Module, PyTorchModelHubMixin):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.is_train:
+        if self.is_train and self.video_encoder is not None:
             self.video_encoder.eval()
         return self
     
@@ -1553,7 +1571,19 @@ class Dolphin(nn.Module, PyTorchModelHubMixin):
         return model
         
     def forward(self, input, mouth):
-        mouth = self.video_encoder(mouth).permute(0, 2, 1).contiguous()
+        if self.visual_input_type == "avhubert_embeddings":
+            if mouth is None or mouth.ndim != 3:
+                raise ValueError(
+                    "AV-HuBERT mode expects visual input with shape (batch, frames, features)"
+                )
+            if mouth.size(-1) != self.pre_v1.conv.in_channels:
+                raise ValueError(
+                    f"Expected {self.pre_v1.conv.in_channels} AV-HuBERT features per frame, "
+                    f"got {mouth.size(-1)}"
+                )
+            mouth = mouth.permute(0, 2, 1).contiguous()
+        else:
+            mouth = self.video_encoder(mouth).permute(0, 2, 1).contiguous()
         v=self.pre_v1(mouth)
         v=self.video_blocks(v)
 

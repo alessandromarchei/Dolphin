@@ -1,6 +1,7 @@
 import json
 import os
 import random
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -26,6 +27,9 @@ class AVSpeechDataset(Dataset):
         segment: float = 4.0,
         normalize_audio: bool = False,
         is_train: bool = True,
+        visual_input_type: str = "mouth_frames",
+        visual_embeddings_dir: str = None,
+        visual_embedding_dim: int = 1024,
     ):
         super().__init__()
         if json_dir is None:
@@ -36,6 +40,27 @@ class AVSpeechDataset(Dataset):
         self.sample_rate = sample_rate
         self.normalize_audio = normalize_audio
         self.is_train = is_train
+        if visual_input_type not in {"mouth_frames", "avhubert_embeddings"}:
+            raise ValueError(
+                "visual_input_type must be 'mouth_frames' or 'avhubert_embeddings', "
+                f"got {visual_input_type!r}"
+            )
+        self.visual_input_type = visual_input_type
+        self.visual_embeddings_dir = (
+            Path(visual_embeddings_dir).expanduser() if visual_embeddings_dir else None
+        )
+        self.visual_embedding_dim = visual_embedding_dim
+        if self.visual_input_type == "avhubert_embeddings" and not self.visual_embeddings_dir:
+            raise ValueError(
+                "visual_embeddings_dir is required when visual_input_type='avhubert_embeddings'"
+            )
+        if self.visual_input_type == "avhubert_embeddings":
+            if self.visual_embedding_dim < 1:
+                raise ValueError("visual_embedding_dim must be a positive integer")
+            if not self.visual_embeddings_dir.is_dir():
+                raise FileNotFoundError(
+                    f"AV-HuBERT embeddings directory not found: {self.visual_embeddings_dir}"
+                )
         self.lipreading_preprocessing_func = get_preprocessing_pipelines()[
             "train" if is_train else "val"
         ]
@@ -115,6 +140,34 @@ class AVSpeechDataset(Dataset):
     def __len__(self):
         return self.length
 
+    def _load_visual_input(self, source_json):
+        if self.visual_input_type == "avhubert_embeddings":
+            source_stem = Path(source_json[1]).stem
+            embedding_path = Path(self.visual_embeddings_dir) / f"{source_stem}.npy"
+            if not embedding_path.is_file():
+                raise FileNotFoundError(
+                    f"Precomputed AV-HuBERT embedding not found for {source_json[1]}: "
+                    f"{embedding_path}"
+                )
+            visual_input = np.load(embedding_path)
+            if visual_input.ndim != 2:
+                raise ValueError(
+                    f"Expected AV-HuBERT embeddings with shape (frames, {self.visual_embedding_dim}), "
+                    f"got {visual_input.shape} in {embedding_path}"
+                )
+            if visual_input.shape[1] != self.visual_embedding_dim:
+                raise ValueError(
+                    f"Expected AV-HuBERT embedding dimension {self.visual_embedding_dim}, "
+                    f"got {visual_input.shape[1]} in {embedding_path}"
+                )
+            if visual_input.shape[0] == 0:
+                raise ValueError(f"AV-HuBERT embedding contains no frames: {embedding_path}")
+            if self.fps_len is not None:
+                visual_input = visual_input[: self.fps_len]
+            return np.asarray(visual_input, dtype=np.float32)
+
+        return self.lipreading_preprocessing_func(np.load(source_json[1])["data"])
+
     def __getitem__(self, idx: int):
         eps = 1e-8
         if self.is_train and self.n_src == 1:
@@ -140,8 +193,8 @@ class AVSpeechDataset(Dataset):
             s1 = sf.read(s1_json[0], start=rand_start, stop=stop, dtype="float32")[0]
             s2 = sf.read(s2_json[0], start=rand_start, stop=stop, dtype="float32")[0]
 
-            s1_mouth = self.lipreading_preprocessing_func(np.load(s1_json[1])["data"])[: self.fps_len]
-            s2_mouth = self.lipreading_preprocessing_func(np.load(s2_json[1])["data"])[: self.fps_len]
+            s1_mouth = self._load_visual_input(s1_json)[: self.fps_len]
+            s2_mouth = self._load_visual_input(s2_json)[: self.fps_len]
 
             sources_json = [s1_json, s2_json]
             mouths = [s1_mouth, s2_mouth]
@@ -163,9 +216,7 @@ class AVSpeechDataset(Dataset):
 
             mix_source, _ = sf.read(self.mix[idx][0], start=rand_start, stop=stop, dtype="float32")
             source = sf.read(self.sources[idx][0], start=rand_start, stop=stop, dtype="float32")[0]
-            source_mouth = self.lipreading_preprocessing_func(np.load(self.sources[idx][1])["data"])[
-                : self.fps_len
-            ]
+            source_mouth = self._load_visual_input(self.sources[idx])[: self.fps_len]
 
             source_mouth = torch.from_numpy(np.asarray(source_mouth, dtype=np.float32))
             source = torch.from_numpy(source)
@@ -188,7 +239,7 @@ class AVSpeechDataset(Dataset):
         sources_mouths = torch.stack(
             [
                 torch.from_numpy(
-                    np.asarray(self.lipreading_preprocessing_func(np.load(src[1])["data"]), dtype=np.float32)
+                    np.asarray(self._load_visual_input(src), dtype=np.float32)
                 )
                 for src in self.sources[idx]
             ]
@@ -214,6 +265,9 @@ class AVSpeechDataModule(object):
         sample_rate: int = 8000,
         segment: float = 4.0,
         normalize_audio: bool = False,
+        visual_input_type: str = "mouth_frames",
+        visual_embeddings_dir: str = None,
+        visual_embedding_dim: int = 1024,
         batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
@@ -232,6 +286,9 @@ class AVSpeechDataModule(object):
         self.sample_rate = sample_rate
         self.segment = segment
         self.normalize_audio = normalize_audio
+        self.visual_input_type = visual_input_type
+        self.visual_embeddings_dir = visual_embeddings_dir
+        self.visual_embedding_dim = visual_embedding_dim
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -249,6 +306,9 @@ class AVSpeechDataModule(object):
             segment=self.segment,
             normalize_audio=self.normalize_audio,
             is_train=True,
+            visual_input_type=self.visual_input_type,
+            visual_embeddings_dir=self.visual_embeddings_dir,
+            visual_embedding_dim=self.visual_embedding_dim,
         )
         self.data_val = AVSpeechDataset(
             json_dir=self.valid_dir,
@@ -257,6 +317,9 @@ class AVSpeechDataModule(object):
             segment=self.segment,
             normalize_audio=self.normalize_audio,
             is_train=False,
+            visual_input_type=self.visual_input_type,
+            visual_embeddings_dir=self.visual_embeddings_dir,
+            visual_embedding_dim=self.visual_embedding_dim,
         )
         self.data_test = AVSpeechDataset(
             json_dir=self.test_dir,
@@ -265,6 +328,9 @@ class AVSpeechDataModule(object):
             segment=self.segment,
             normalize_audio=self.normalize_audio,
             is_train=False,
+            visual_input_type=self.visual_input_type,
+            visual_embeddings_dir=self.visual_embeddings_dir,
+            visual_embedding_dim=self.visual_embedding_dim,
         )
 
     def train_dataloader(self) -> DataLoader:

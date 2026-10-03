@@ -75,6 +75,9 @@ def main(config):
         model_path = os.path.join(exp_dir, "best_model.pth")
         audionet_cfg = dict(config["audionet"]["audionet_config"])
         audionet_cfg["is_train"] = False
+        visual_cfg = config.get("visual", {})
+        audionet_cfg["visual_input_type"] = visual_cfg.get("input_type", "mouth_frames")
+        audionet_cfg["visual_embedding_dim"] = int(visual_cfg.get("embedding_dim", 1024))
 
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         if "state_dict" in checkpoint:
@@ -94,8 +97,15 @@ def main(config):
     model.eval()
 
     # ---- data ----
+    visual_cfg = config.get("visual", {})
+    data_cfg = dict(config["datamodule"]["data_config"])
+    data_cfg.update(
+        visual_input_type=visual_cfg.get("input_type", "mouth_frames"),
+        visual_embeddings_dir=visual_cfg.get("embeddings_dir"),
+        visual_embedding_dim=int(visual_cfg.get("embedding_dim", 1024)),
+    )
     datamodule = getattr(look2hear.datas, config["datamodule"]["data_name"])(
-        **config["datamodule"]["data_config"],
+        **data_cfg,
     )
     datamodule.setup()
     _, _, test_set = datamodule.make_sets
@@ -129,7 +139,10 @@ def main(config):
                 mix, source, mouth, key = test_set[idx]
                 mix = mix.to(device)
                 source = source.to(device)
-                mouth = mouth.unsqueeze(0).unsqueeze(0).to(device)
+                if visual_cfg.get("input_type", "mouth_frames") == "avhubert_embeddings":
+                    mouth = mouth.unsqueeze(0).to(device)
+                else:
+                    mouth = mouth.unsqueeze(0).unsqueeze(0).to(device)
 
                 est_source = model(mix.unsqueeze(0), mouth)
                 est_source = est_source.squeeze(0)

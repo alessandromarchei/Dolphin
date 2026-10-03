@@ -134,6 +134,25 @@ pip install torch torchvision
 pip install -r requirements.txt
 ```
 
+### Training with precomputed AV-HuBERT visual embeddings
+
+The default `visual.input_type: mouth_frames` setting in `configs/dolphin.yml`
+continues to use Dolphin's original visual encoder and the existing Hugging Face
+pretrained weights. To train with precomputed AV-HuBERT features instead, set
+`visual.input_type` to `avhubert_embeddings` and pass the directory containing
+clip-named `.npy` files:
+
+```bash
+python train.py --visual-embeddings-dir /path/to/AVHubert_embeddings
+```
+
+Passing `--visual-embeddings-dir` selects AV-HuBERT mode unless
+`--visual-input` is explicitly set. The dataset matches each source clip's
+`.npz` stem to a `.npy` file in that directory (for example,
+`id00015_AD2Mmf774IU_00085.npz` to `id00015_AD2Mmf774IU_00085.npy`), expects
+features shaped `(frames, 1024)`, and uses the same configured segment duration
+and separation training/loss schedule as the mouth-frame mode.
+
 ### Requirements
 
 - Python >= 3.10

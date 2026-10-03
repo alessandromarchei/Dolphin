@@ -147,6 +147,17 @@ def parse_args():
     p.add_argument("--compile-fullgraph", action="store_true")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--devices", type=int, nargs="+", default=None)
+    p.add_argument(
+        "--visual-input",
+        choices=["mouth_frames", "avhubert_embeddings"],
+        default=None,
+        help="Visual input source. Defaults to the YAML visual.input_type setting.",
+    )
+    p.add_argument(
+        "--visual-embeddings-dir",
+        default=None,
+        help="Directory of per-clip AV-HuBERT .npy embeddings; supplying it selects AV-HuBERT mode by default.",
+    )
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--save-every", type=int, default=1000, help="Periodic checkpoint interval in training batches. 0 disables.")
     return p.parse_args()
@@ -167,6 +178,13 @@ def main(args):
         info(f"NEW RUN | requested={requested} | resolved={exp_name}")
 
     config = deepcopy(config)
+    visual_cfg = config.setdefault("visual", {})
+    if args.visual_input is not None:
+        visual_cfg["input_type"] = args.visual_input
+    elif args.visual_embeddings_dir is not None:
+        visual_cfg["input_type"] = "avhubert_embeddings"
+    if args.visual_embeddings_dir is not None:
+        visual_cfg["embeddings_dir"] = args.visual_embeddings_dir
     checkpoint_dir = exp_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     config.setdefault("exp", {})["exp_name"] = exp_name
@@ -206,7 +224,15 @@ def main(args):
     world_size = len(devices) if isinstance(devices, (list, tuple)) else int(devices)
 
     # Data.
-    data_name, data_cfg = config["datamodule"]["data_name"], config["datamodule"]["data_config"]
+    data_name = config["datamodule"]["data_name"]
+    data_cfg = dict(config["datamodule"]["data_config"])
+    visual_input_type = visual_cfg.get("input_type", "mouth_frames")
+    visual_embedding_dim = int(visual_cfg.get("embedding_dim", 1024))
+    data_cfg.update(
+        visual_input_type=visual_input_type,
+        visual_embeddings_dir=visual_cfg.get("embeddings_dir"),
+        visual_embedding_dim=visual_embedding_dim,
+    )
     info(f"Data: {data_name}")
     datamodule = getattr(look2hear.datas, data_name)(**data_cfg)
     datamodule.setup()
@@ -219,6 +245,10 @@ def main(args):
     audionet_cfg = config["audionet"]["audionet_config"]
     model_cfg = dict(audionet_cfg)
     model_cfg.setdefault("sample_rate", data_cfg["sample_rate"])
+    model_cfg.update(
+        visual_input_type=visual_input_type,
+        visual_embedding_dim=visual_embedding_dim,
+    )
     info(f"Model: {audionet_name}")
     model = getattr(look2hear.models, audionet_name)(**model_cfg)
 
