@@ -153,7 +153,19 @@ def parse_args():
     p.add_argument("--compile-dynamic", action="store_true")
     p.add_argument("--compile-fullgraph", action="store_true")
     p.add_argument("--epochs", type=int, default=None)
-    p.add_argument("--devices", type=int, nargs="+", default=None)
+    p.add_argument(
+        "--accelerator",
+        choices=["auto", "cpu", "cuda", "tpu"],
+        default="cuda",
+        help="Training device backend. TPU uses PyTorch/XLA (8 cores by default).",
+    )
+    p.add_argument(
+        "--devices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="GPU device IDs, or a single TPU core count from 1 to 8.",
+    )
     p.add_argument(
         "--visual-input",
         choices=["mouth_frames", "avhubert_embeddings"],
@@ -212,21 +224,68 @@ def main(args):
     else: precision = "32-true"
 
     tf32 = args.tf32 or bool(old_rt.get("tf32", False))
-    devices_override = args.devices if args.devices is not None else old_rt.get("devices") if args.resume else None
+    requested_accelerator = (
+        args.accelerator
+        or (old_rt.get("accelerator") if args.resume else None)
+        or safe_get(config, "training.accelerator", "auto")
+    )
+    if requested_accelerator not in {"auto", "cpu", "cuda", "tpu"}:
+        raise ValueError(
+            "training.accelerator must be one of: auto, cpu, cuda, tpu; "
+            f"got {requested_accelerator!r}."
+        )
+    if requested_accelerator == "auto":
+        accelerator = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        accelerator = requested_accelerator
+    if accelerator == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was selected, but CUDA is not available.")
+    if accelerator == "tpu":
+        from pytorch_lightning.accelerators import XLAAccelerator
+
+        if not XLAAccelerator.is_available():
+            raise RuntimeError(
+                "TPU training requires a TPU runtime with a compatible torch_xla installation. "
+                "Install PyTorch/XLA for this TPU VM using the official instructions: "
+                "https://docs.pytorch.org/xla/"
+            )
+
+    saved_devices = old_rt.get("devices") if args.resume else None
+    devices_override = args.devices
+    if devices_override is None and saved_devices is not None:
+        if old_rt.get("accelerator", accelerator) == accelerator:
+            devices_override = saved_devices
 
     if batch_size is not None: config["datamodule"]["data_config"]["batch_size"] = int(batch_size)
     if args.epochs is not None: config["training"]["epochs"] = args.epochs
     if grad_accum < 1: raise ValueError("--grad-accum must be >= 1")
 
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
-    configure_precision(tf32)
-
-    if torch.cuda.is_available():
-        accelerator = "cuda"
+    if accelerator == "cuda":
         devices = devices_override if devices_override is not None else safe_get(config, "training.gpus", [0])
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+    elif accelerator == "tpu":
+        if precision == "16-mixed":
+            raise ValueError("FP16 mixed precision is not supported for TPU runs; use --bf16 instead.")
+        if use_compile:
+            info("Disabling torch.compile on TPU; this path does not select an XLA compiler backend.")
+            use_compile = False
+        devices = devices_override if devices_override is not None else safe_get(config, "training.tpu_devices", 8)
+        if isinstance(devices, (list, tuple)):
+            if len(devices) != 1:
+                raise ValueError("For TPU, pass a single --devices value representing the core count (1-8).")
+            devices = devices[0]
+        if not isinstance(devices, int) or not 1 <= devices <= 8:
+            raise ValueError("TPU device count must be an integer from 1 to 8 for a TPU v5e-8.")
+        config["datamodule"]["data_config"]["pin_memory"] = False
+        tf32 = False
     else:
-        if precision != "32-true": raise RuntimeError("Mixed precision requested but CUDA is unavailable.")
+        if precision != "32-true": raise RuntimeError("Mixed precision is not enabled for the CPU backend.")
         accelerator, devices = "cpu", 1
+        tf32 = False
+    if accelerator == "cuda":
+        configure_precision(tf32)
+    else:
+        tf32 = False
 
     world_size = len(devices) if isinstance(devices, (list, tuple)) else int(devices)
 
@@ -318,10 +377,18 @@ def main(args):
         accelerator=accelerator, devices=devices, precision=precision, accumulate_grad_batches=grad_accum,
         gradient_clip_val=safe_get(config, "training.gradient_clip_val", 5.0),
         limit_train_batches=safe_get(config, "training.limit_train_batches", 1.0), logger=logger,
-        sync_batchnorm=safe_get(config, "training.sync_batchnorm", True) if world_size > 1 else False,
+        sync_batchnorm=(
+            safe_get(config, "training.sync_batchnorm", True)
+            if accelerator == "cuda" and world_size > 1
+            else False
+        ),
         log_every_n_steps=args.log_every, num_sanity_val_steps=0,
     )
-    if torch.cuda.is_available() and world_size > 1:
+    if accelerator == "tpu":
+        from pytorch_lightning.strategies.xla import XLAStrategy
+
+        trainer_kwargs["strategy"] = XLAStrategy()
+    elif accelerator == "cuda" and world_size > 1:
         trainer_kwargs["strategy"] = DDPStrategy(find_unused_parameters=True)
 
     info("=" * 78)
@@ -332,7 +399,7 @@ def main(args):
     info(f"Device            : {accelerator} {devices}")
     info(f"Precision / TF32  : {precision} / {tf32}")
     info(f"torch.compile     : {use_compile} ({compile_mode if use_compile else '-'})")
-    info(f"Batch             : {physical_batch} x accum {grad_accum} x GPUs {world_size} = {effective_batch}")
+    info(f"Batch             : {physical_batch} x accum {grad_accum} x devices {world_size} = {effective_batch}")
     info(f"Epochs            : {safe_get(config, 'training.epochs', 100)}")
     info(f"Safety checkpoint : every {args.save_every} train batches" if args.save_every else "Safety checkpoint : disabled")
     info(f"Compile cache     : {COMPILE_CACHE}")

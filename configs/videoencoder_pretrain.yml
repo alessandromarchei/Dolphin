@@ -39,6 +39,9 @@ encoded_video:
 
 # Training config
 training:
+  accelerator: auto
+  tpu_devices: 8
+  precision: 32-true
   gpus: [0]
   epochs: 500
   gradient_clip_val: 5.0

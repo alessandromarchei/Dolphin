@@ -153,11 +153,37 @@ Passing `--visual-embeddings-dir` selects AV-HuBERT mode unless
 features shaped `(frames, 1024)`, and uses the same configured segment duration
 and separation training/loss schedule as the mouth-frame mode.
 
+### Training on a Google Cloud TPU v5e-8
+
+Both the separation trainer and video-encoder pretrainer accept an explicit TPU
+backend. On a TPU VM, install a PyTorch/XLA build that matches the installed
+PyTorch version by following the
+[official PyTorch/XLA installation guide](https://docs.pytorch.org/xla/), then
+install the remaining project dependencies without replacing that PyTorch/XLA
+stack. Do not use the generic NVIDIA-oriented `pip install torch torchvision`
+step above on a TPU VM; reconcile the `torch`, `torchvision`, and `torchaudio`
+requirements with the versions supported by the XLA installation.
+
+```bash
+python train.py --accelerator tpu
+python videoencoder_pretrain/pretrain.py --accelerator tpu --bf16
+```
+
+The configs can select TPU instead with `training.accelerator: tpu`; both
+training configs default `training.tpu_devices` to 8 for v5e-8. Use
+`--devices 8` (or update `training.tpu_devices`) to override the core count.
+The TPU strategy is Lightning's XLA strategy, and TPU runs automatically turn
+off DataLoader pinned memory and the default `torch.compile` path. Use `--bf16`
+for mixed bfloat16 precision; FP16 is rejected on TPU. Batch size is per
+device, so eight TPU cores multiply the effective batch size by eight unless
+you adjust the configured batch size or gradient accumulation.
+
 ### Requirements
 
 - Python >= 3.10
 - PyTorch >= 2.5.0
-- CUDA >= 12.4
+- CUDA >= 12.4 for NVIDIA GPU training, or a matching PyTorch/XLA installation
+  on Google Cloud TPU VMs
 - Other dependencies in requirements.txt
 
 ## 🔍 Inference with Pre-trained Model

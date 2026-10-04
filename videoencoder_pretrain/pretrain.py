@@ -24,9 +24,6 @@ from look2hear.datas import VideoPretrainDataModule
 from look2hear.models import VideoEncoder
 
 
-torch.cuda.empty_cache()
-
-
 def info(msg: str) -> None:
     print(f"[video-pretrain] {msg}")
 
@@ -110,7 +107,6 @@ class VideoEncoderPretrainSystem(pl.LightningModule):
             return None
 
         embeddings = []
-        import pdb; pdb.set_trace()
         for mouth_path in mouth_paths:
             key = os.path.abspath(str(mouth_path))
             if key not in self.encoded_video:
@@ -192,8 +188,60 @@ class VideoEncoderPretrainSystem(pl.LightningModule):
         return self.val_loader
 
 
-def main(config: Dict[str, Any]) -> None:
-    data_cfg = config["datamodule"]["data_config"]
+def main(
+    config: Dict[str, Any],
+    accelerator_override: str | None = None,
+    devices_override: list[int] | None = None,
+    bf16: bool = False,
+) -> None:
+    requested_accelerator = accelerator_override or safe_get(config, "training.accelerator", "auto")
+    if requested_accelerator not in {"auto", "cpu", "cuda", "tpu"}:
+        raise ValueError(
+            "training.accelerator must be one of: auto, cpu, cuda, tpu; "
+            f"got {requested_accelerator!r}."
+        )
+    if requested_accelerator == "auto":
+        accelerator = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        accelerator = requested_accelerator
+    if accelerator == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was selected, but CUDA is not available.")
+    if accelerator == "tpu":
+        from pytorch_lightning.accelerators import XLAAccelerator
+
+        if not XLAAccelerator.is_available():
+            raise RuntimeError(
+                "TPU training requires a TPU runtime with a compatible torch_xla installation. "
+                "Install PyTorch/XLA for this TPU VM using the official instructions: "
+                "https://docs.pytorch.org/xla/"
+            )
+
+    precision = "bf16-mixed" if bf16 else safe_get(config, "training.precision", "32-true")
+    if accelerator == "tpu" and precision == "16-mixed":
+        raise ValueError("FP16 mixed precision is not supported for TPU runs; use BF16 instead.")
+    if accelerator == "cpu" and precision != "32-true":
+        raise RuntimeError("Mixed precision was requested, but the CPU backend is selected.")
+
+    if devices_override is not None:
+        devices = devices_override
+    elif accelerator == "tpu":
+        devices = safe_get(config, "training.tpu_devices", 8)
+    elif accelerator == "cuda":
+        devices = safe_get(config, "training.gpus", 1)
+    else:
+        devices = 1
+    if accelerator == "tpu":
+        if isinstance(devices, (list, tuple)):
+            if len(devices) != 1:
+                raise ValueError("For TPU, pass a single --devices value representing the core count (1-8).")
+            devices = devices[0]
+        if not isinstance(devices, int) or not 1 <= devices <= 8:
+            raise ValueError("TPU device count must be an integer from 1 to 8 for a TPU v5e-8.")
+
+    data_cfg = dict(config["datamodule"]["data_config"])
+    if accelerator == "tpu":
+        data_cfg["pin_memory"] = False
+        config["datamodule"]["data_config"]["pin_memory"] = False
     model_cfg = config["audionet"]["audionet_config"]
 
     info("instantiating datamodule <VideoPretrainDataModule>")
@@ -214,6 +262,11 @@ def main(config: Dict[str, Any]) -> None:
 
     config.setdefault("main_args", {})
     config["main_args"]["exp_dir"] = exp_dir
+    config["runtime"] = {
+        "accelerator": accelerator,
+        "devices": devices,
+        "precision": precision,
+    }
     with open(os.path.join(exp_dir, "conf.yml"), "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
 
@@ -241,21 +294,28 @@ def main(config: Dict[str, Any]) -> None:
     if early_stop_cfg:
         callbacks.append(EarlyStopping(**early_stop_cfg))
 
-    gpus = safe_get(config, "training.gpus", 1) if torch.cuda.is_available() else 1
-    accelerator = "cuda" if torch.cuda.is_available() else "cpu"
-
     trainer_kwargs = dict(
         max_epochs=safe_get(config, "training.epochs", 100),
         callbacks=callbacks,
         default_root_dir=exp_dir,
-        devices=gpus,
+        devices=devices,
         accelerator=accelerator,
+        precision=precision,
         limit_train_batches=safe_get(config, "training.limit_train_batches", 1.0),
         gradient_clip_val=safe_get(config, "training.gradient_clip_val", 5.0),
         logger=build_logger(config, exp_name),
-        sync_batchnorm=safe_get(config, "training.sync_batchnorm", True),
+        sync_batchnorm=(
+            safe_get(config, "training.sync_batchnorm", True)
+            if accelerator != "tpu"
+            else False
+        ),
     )
-    if torch.cuda.is_available() and ((isinstance(gpus, list) and len(gpus) > 1) or (isinstance(gpus, int) and gpus > 1)):
+    world_size = len(devices) if isinstance(devices, (list, tuple)) else int(devices)
+    if accelerator == "tpu":
+        from pytorch_lightning.strategies.xla import XLAStrategy
+
+        trainer_kwargs["strategy"] = XLAStrategy()
+    elif accelerator == "cuda" and world_size > 1:
         trainer_kwargs["strategy"] = DDPStrategy(find_unused_parameters=True)
 
     trainer = pl.Trainer(**trainer_kwargs)
@@ -281,8 +341,22 @@ if __name__ == "__main__":
         default="configs/videoencoder_pretrain.yml",
         help="Path to video encoder pretraining config yaml.",
     )
+    parser.add_argument(
+        "--accelerator",
+        choices=["auto", "cpu", "cuda", "tpu"],
+        default=None,
+        help="Training device backend. TPU uses PyTorch/XLA (8 cores by default).",
+    )
+    parser.add_argument(
+        "--devices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="GPU device IDs, or a single TPU core count from 1 to 8.",
+    )
+    parser.add_argument("--bf16", action="store_true", help="Use mixed BF16 precision.")
     args = parser.parse_args()
 
     with open(args.conf_dir, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    main(config)
+    main(config, accelerator_override=args.accelerator, devices_override=args.devices, bf16=args.bf16)

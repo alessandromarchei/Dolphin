@@ -132,6 +132,8 @@ loss:
 
 # Training config
 training:
+  accelerator: auto
+  tpu_devices: 8
   system: AudioVisualLightningModuleAE
   gpus: [0]
   parallel: ddp

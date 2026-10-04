@@ -132,8 +132,6 @@ loss:
 
 # Training config
 training:
-  accelerator: auto
-  tpu_devices: 8
   system: AudioVisualLightningModuleAE
   gpus: [0]
   parallel: ddp
@@ -163,16 +161,19 @@ scheduler:
 visual:
   # Keep "mouth_frames" for Dolphin's original visual encoder, or select
   # "avhubert_embeddings" to load precomputed (frames, 1024) .npy features.
-  input_type: avhubert_embeddings
+  input_type: mouth_frames
   embeddings_dir: null
   embedding_dim: 1024
 
 datamodule:
   data_name: AVSpeechDataModule
   data_config:
-    train_dir: DataPreProcess/LRS2/tr
-    valid_dir: DataPreProcess/LRS2/cv
-    test_dir: DataPreProcess/LRS2/tt
+    train_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/tr.lmdb
+    valid_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/cv.lmdb
+    test_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/tt.lmdb
+    train_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/tr
+    valid_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/cv
+    test_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/tt
     n_src: 1
     sample_rate: 16000
     segment: 2.0
@@ -183,7 +184,7 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: Dolphin_LRS2_avhubert
+  exp_name: Dolphin_LRS2
 
 logging:
   use_wandb: true
