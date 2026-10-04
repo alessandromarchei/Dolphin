@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from .transform import get_preprocessing_pipelines
 
+import io
+import lmdb
+
 
 def normalize_tensor_wav(wav_tensor, eps=1e-8, std=None):
     mean = wav_tensor.mean(-1, keepdim=True)
@@ -30,6 +33,7 @@ class AVSpeechDataset(Dataset):
         visual_input_type: str = "mouth_frames",
         visual_embeddings_dir: str = None,
         visual_embedding_dim: int = 1024,
+        lmdb_path: str = None,
     ):
         super().__init__()
         if json_dir is None:
@@ -137,36 +141,145 @@ class AVSpeechDataset(Dataset):
             )
             self.length = orig_len
 
+            self.lmdb_path = str(lmdb_path) if lmdb_path else None
+
+            self._lmdb_env = None
+
     def __len__(self):
         return self.length
+
+    def _get_lmdb_env(self):
+        if self._lmdb_env is None:
+            if self.lmdb_path is None:
+                raise RuntimeError("LMDB path is not configured")
+
+            self._lmdb_env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+                max_readers=256,
+                subdir=True,
+            )
+
+        return self._lmdb_env
+
+
+    def _lmdb_get(self, key: str) -> bytes:
+        env = self._get_lmdb_env()
+
+        with env.begin(write=False) as txn:
+            value = txn.get(key.encode("utf-8"))
+
+        if value is None:
+            raise KeyError(
+                f"LMDB key not found: {key} "
+                f"(database={self.lmdb_path})"
+            )
+
+        return value
+
+
+    @staticmethod
+    def _utterance_from_source_path(path: str) -> str:
+        """
+        source filename example:
+
+        6261660309214448793_00028_0.81423_
+        5933122369233932002_00068_-0.81423.wav
+
+        Directory tells us whether this is s1 or s2.
+        """
+
+        p = Path(path)
+
+        stem_parts = p.stem.split("_")
+
+        if p.parent.name == "s1":
+            return f"{stem_parts[0]}_{stem_parts[1]}"
+
+        if p.parent.name == "s2":
+            return f"{stem_parts[3]}_{stem_parts[4]}"
+
+        raise ValueError(f"Expected s1/s2 source path, got {path}")
+
+
+    def _load_audio_lmdb(self, path: str):
+        p = Path(path)
+
+        kind = p.parent.name
+
+        if kind not in {"mix", "s1", "s2"}:
+            raise ValueError(f"Unknown audio type from path: {path}")
+
+        key = f"audio/{kind}/{p.name}"
+
+        wav_bytes = self._lmdb_get(key)
+
+        audio, sample_rate = sf.read(
+            io.BytesIO(wav_bytes),
+            dtype="float32",
+        )
+
+        return audio, sample_rate
+
+
+    def _load_mouth_lmdb(self, source_path: str):
+        utt = self._utterance_from_source_path(source_path)
+
+        key = f"mouth/{utt}.npz"
+
+        npz_bytes = self._lmdb_get(key)
+
+        with np.load(io.BytesIO(npz_bytes)) as npz:
+            data = npz["data"]
+
+        return data
+
 
     def _load_visual_input(self, source_json):
         if self.visual_input_type == "avhubert_embeddings":
             source_stem = Path(source_json[1]).stem
             embedding_path = Path(self.visual_embeddings_dir) / f"{source_stem}.npy"
+
             if not embedding_path.is_file():
                 raise FileNotFoundError(
                     f"Precomputed AV-HuBERT embedding not found for {source_json[1]}: "
                     f"{embedding_path}"
                 )
+
             visual_input = np.load(embedding_path)
+
             if visual_input.ndim != 2:
                 raise ValueError(
-                    f"Expected AV-HuBERT embeddings with shape (frames, {self.visual_embedding_dim}), "
+                    f"Expected AV-HuBERT embeddings with shape "
+                    f"(frames, {self.visual_embedding_dim}), "
                     f"got {visual_input.shape} in {embedding_path}"
                 )
+
             if visual_input.shape[1] != self.visual_embedding_dim:
                 raise ValueError(
-                    f"Expected AV-HuBERT embedding dimension {self.visual_embedding_dim}, "
+                    f"Expected AV-HuBERT embedding dimension "
+                    f"{self.visual_embedding_dim}, "
                     f"got {visual_input.shape[1]} in {embedding_path}"
                 )
+
             if visual_input.shape[0] == 0:
-                raise ValueError(f"AV-HuBERT embedding contains no frames: {embedding_path}")
+                raise ValueError(
+                    f"AV-HuBERT embedding contains no frames: {embedding_path}"
+                )
+
             if self.fps_len is not None:
                 visual_input = visual_input[: self.fps_len]
+
             return np.asarray(visual_input, dtype=np.float32)
 
-        return self.lipreading_preprocessing_func(np.load(source_json[1])["data"])
+        # mouth_frames mode: load the NPZ bytes from LMDB
+        mouth = self._load_mouth_lmdb(source_json[0])
+
+        # Same original Dolphin preprocessing
+        return self.lipreading_preprocessing_func(mouth)
 
     def __getitem__(self, idx: int):
         eps = 1e-8
@@ -190,8 +303,11 @@ class AVSpeechDataset(Dataset):
                 if s1_name != s2_name:
                     break
 
-            s1 = sf.read(s1_json[0], start=rand_start, stop=stop, dtype="float32")[0]
-            s2 = sf.read(s2_json[0], start=rand_start, stop=stop, dtype="float32")[0]
+            s1, _ = self._load_audio_lmdb(s1_json[0])
+            s2, _ = self._load_audio_lmdb(s2_json[0])
+
+            s1 = s1[rand_start:stop]
+            s2 = s2[rand_start:stop]
 
             s1_mouth = self._load_visual_input(s1_json)[: self.fps_len]
             s2_mouth = self._load_visual_input(s2_json)[: self.fps_len]
@@ -214,8 +330,11 @@ class AVSpeechDataset(Dataset):
             rand_start = 0
             stop = None if self.test else rand_start + self.seg_len
 
-            mix_source, _ = sf.read(self.mix[idx][0], start=rand_start, stop=stop, dtype="float32")
-            source = sf.read(self.sources[idx][0], start=rand_start, stop=stop, dtype="float32")[0]
+            mix_source, _ = self._load_audio_lmdb(self.mix[idx][0])
+            source, _ = self._load_audio_lmdb(self.sources[idx][0])
+
+            mix_source = mix_source[rand_start:stop]
+            source = source[rand_start:stop]
             source_mouth = self._load_visual_input(self.sources[idx])[: self.fps_len]
 
             source_mouth = torch.from_numpy(np.asarray(source_mouth, dtype=np.float32))
@@ -231,10 +350,15 @@ class AVSpeechDataset(Dataset):
         rand_start = 0
         stop = None if self.test else rand_start + self.seg_len
 
-        mix_source, _ = sf.read(self.mix[idx][0], start=rand_start, stop=stop, dtype="float32")
+        mix_source, _ = self._load_audio_lmdb(self.mix[idx][0])
+        mix_source = mix_source[rand_start:stop]
+
         sources = []
+
         for src in self.sources[idx]:
-            sources.append(sf.read(src[0], start=rand_start, stop=stop, dtype="float32")[0])
+            source, _ = self._load_audio_lmdb(src[0])
+            source = source[rand_start:stop]
+            sources.append(source)
 
         sources_mouths = torch.stack(
             [
@@ -272,6 +396,9 @@ class AVSpeechDataModule(object):
         num_workers: int = 0,
         pin_memory: bool = False,
         persistent_workers: bool = False,
+        train_lmdb: str = None,
+        valid_lmdb: str = None,
+        test_lmdb: str = None,
     ) -> None:
         super().__init__()
         if train_dir is None or valid_dir is None or test_dir is None:
@@ -297,6 +424,10 @@ class AVSpeechDataModule(object):
         self.data_train: Dataset = None
         self.data_val: Dataset = None
         self.data_test: Dataset = None
+        self.train_lmdb = train_lmdb
+        self.valid_lmdb = valid_lmdb
+        self.test_lmdb = test_lmdb
+
 
     def setup(self) -> None:
         self.data_train = AVSpeechDataset(
@@ -309,6 +440,7 @@ class AVSpeechDataModule(object):
             visual_input_type=self.visual_input_type,
             visual_embeddings_dir=self.visual_embeddings_dir,
             visual_embedding_dim=self.visual_embedding_dim,
+            lmdb_path=self.train_lmdb,
         )
         self.data_val = AVSpeechDataset(
             json_dir=self.valid_dir,
@@ -320,6 +452,7 @@ class AVSpeechDataModule(object):
             visual_input_type=self.visual_input_type,
             visual_embeddings_dir=self.visual_embeddings_dir,
             visual_embedding_dim=self.visual_embedding_dim,
+            lmdb_path=self.valid_lmdb,
         )
         self.data_test = AVSpeechDataset(
             json_dir=self.test_dir,
@@ -331,6 +464,7 @@ class AVSpeechDataModule(object):
             visual_input_type=self.visual_input_type,
             visual_embeddings_dir=self.visual_embeddings_dir,
             visual_embedding_dim=self.visual_embedding_dim,
+            lmdb_path=self.test_lmdb,
         )
 
     def train_dataloader(self) -> DataLoader:

@@ -168,6 +168,9 @@ visual:
 datamodule:
   data_name: AVSpeechDataModule
   data_config:
+    train_lmdb: /kaggle/input/lrs2-lmdb/tr.lmdb
+    valid_lmdb: /kaggle/input/lrs2-lmdb/cv.lmdb
+    test_lmdb: /kaggle/input/lrs2-lmdb/tt.lmdb
     train_dir: /kaggle/working/prepared/LRS2/tr
     valid_dir: /kaggle/working/prepared/LRS2/cv
     test_dir: /kaggle/working/prepared/LRS2/tt
