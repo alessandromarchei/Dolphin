@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Any
 
 # Persistent torch.compile cache. Must be configured before importing torch.
-COMPILE_CACHE = Path.home() / ".cache" / "torchinductor"
+COMPILE_CACHE = Path(
+    os.environ.get(
+        "TORCHINDUCTOR_CACHE_DIR",
+        Path.home() / ".cache" / "torchinductor",
+    )
+)
+
 COMPILE_CACHE.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(COMPILE_CACHE))
+
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(COMPILE_CACHE)
 os.environ.setdefault("TORCHINDUCTOR_FX_GRAPH_CACHE", "1")
 os.environ.setdefault("TORCHINDUCTOR_AUTOGRAD_CACHE", "1")
 
