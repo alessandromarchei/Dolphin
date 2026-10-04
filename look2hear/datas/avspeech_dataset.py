@@ -141,9 +141,9 @@ class AVSpeechDataset(Dataset):
             )
             self.length = orig_len
 
-            self.lmdb_path = str(lmdb_path) if lmdb_path else None
+        self.lmdb_path = str(lmdb_path) if lmdb_path else None
 
-            self._lmdb_env = None
+        self._lmdb_env = None
 
     def __len__(self):
         return self.length
