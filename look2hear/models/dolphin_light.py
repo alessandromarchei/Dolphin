@@ -1466,8 +1466,8 @@ class Dolphin(nn.Module, PyTorchModelHubMixin):
         if (not strict) and (filtered_missing_keys or filtered_unexpected_keys):
             print(
                 "[Dolphin] load video_encoder from hub (strict=False): "
-                f"missing_keys={filtered_missing_keys}, "
-                f"unexpected_keys={filtered_unexpected_keys}"
+                f"missing_keys={len(filtered_missing_keys)}, "
+                f"unexpected_keys={len(filtered_unexpected_keys)}"
             )
 
     def train(self, mode: bool = True):
