@@ -168,12 +168,12 @@ visual:
 datamodule:
   data_name: AVSpeechDataModule
   data_config:
-    train_lmdb: /kaggle/input/lrs2-lmdb/tr.lmdb
-    valid_lmdb: /kaggle/input/lrs2-lmdb/cv.lmdb
-    test_lmdb: /kaggle/input/lrs2-lmdb/tt.lmdb
-    train_dir: /kaggle/working/prepared/LRS2/tr
-    valid_dir: /kaggle/working/prepared/LRS2/cv
-    test_dir: /kaggle/working/prepared/LRS2/tt
+    train_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/tr.lmdb
+    valid_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/cv.lmdb
+    test_lmdb: /kaggle/input/datasets/alessandromarchei/lrs2-2mix/tt.lmdb
+    train_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/tr
+    valid_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/cv
+    test_dir: /kaggle/working/Dolphin/DataPreProcess/LRS2_lmdb/tt
     n_src: 1
     sample_rate: 16000
     segment: 2.0
